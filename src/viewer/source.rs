@@ -12,12 +12,17 @@ use std::time::{Duration, Instant};
 
 use serialport::{DataBits, FlowControl, Parity, StopBits};
 
-use crate::{FrameDecoder, LidarPoint, ParseError};
+use crate::{FrameDecoder, LidarPoint};
 
 const READ_TIMEOUT_MS: u64 = 100;
 const SERIAL_BUF: usize = 512;
 /// 연결 실패 시 재시도 간격.
 const RETRY_DELAY: Duration = Duration::from_secs(1);
+/// 포트를 연 뒤 어댑터/장치가 안정될 때까지 잠깐 대기(재연결 직후 깨진 바이트 회피).
+const OPEN_SETTLE: Duration = Duration::from_millis(120);
+/// 연결은 됐는데 유효 프레임이 이 시간 동안 안 오면 "나쁜 상태"로 보고 끊어 재연결한다.
+/// (정상 연결은 매 read마다 프레임이 오므로 절대 걸리지 않는다.)
+const DATA_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// 공급원 종류.
 pub enum Source {
@@ -91,8 +96,14 @@ fn run_serial(port_name: &str, baud: u32, tx: &Sender<LidarPoint>, status: &Shar
         match opened {
             Ok(mut port) => {
                 eprintln!("[viewer] {port_name} 연결됨 — {baud} 8N1");
-                set_status(status, ConnectionStatus::Connected);
-                // 읽기 루프가 끝났다는 건 채널 종료(앱 종료) 또는 읽기 오류.
+                // 재연결 직후 어댑터가 안정될 시간을 준 뒤, 그동안 쌓인 묵은/조각
+                // 바이트를 비워 디코더가 깨끗한 프레임 경계부터 시작하게 한다.
+                thread::sleep(OPEN_SETTLE);
+                let _ = port.clear(serialport::ClearBuffer::Input);
+                // 링크는 열렸지만 유효 프레임을 받기 전까지는 "연결 중"으로 둔다.
+                // (정상 데이터가 들어오면 pump_serial이 Connected로 바꾼다.)
+                set_status(status, ConnectionStatus::Connecting);
+                // 읽기 루프가 끝났다는 건 채널 종료(앱 종료) 또는 읽기 오류/무데이터.
                 if pump_serial(&mut *port, tx, status) {
                     return; // 앱 종료.
                 }
@@ -127,6 +138,8 @@ fn pump_serial(
     let mut buffer = [0_u8; SERIAL_BUF];
     let mut stats = DecodeStats::default();
     let mut last_report = Instant::now();
+    let mut last_frame_at = Instant::now();
+    let mut connected = false;
 
     loop {
         match port.read(&mut buffer) {
@@ -141,32 +154,37 @@ fn pump_serial(
                     }
                 }
 
-                for frame in decoder.push_bytes(&buffer[..read]) {
-                    match frame {
-                        Ok(body) => {
-                            if debug {
-                                stats.ok += 1;
-                                if !stats.logged_first_frame {
-                                    eprintln!(
-                                        "[debug] 첫 프레임 파싱 OK: speed={}deg/s start={:.2} end={:.2} pts={}",
-                                        body.speed_degrees_per_second,
-                                        body.start_angle_degrees,
-                                        body.end_angle_degrees,
-                                        body.points.len()
-                                    );
-                                    stats.logged_first_frame = true;
-                                }
-                            }
-                            for point in body.points {
-                                if tx.send(point).is_err() {
-                                    return true; // 수신 측 종료.
-                                }
-                            }
+                let frames = decoder.push_bytes(&buffer[..read]);
+                if debug {
+                    stats.skipped += decoder.last_skipped();
+                    stats.crc_failures += decoder.last_crc_failures();
+                }
+
+                if !frames.is_empty() {
+                    last_frame_at = Instant::now();
+                    if !connected {
+                        connected = true;
+                        set_status(status, ConnectionStatus::Connected);
+                    }
+                }
+
+                for body in frames {
+                    if debug {
+                        stats.ok += 1;
+                        if !stats.logged_first_frame {
+                            eprintln!(
+                                "[debug] 첫 프레임 파싱 OK: speed={}deg/s start={:.2} end={:.2} pts={}",
+                                body.speed_degrees_per_second,
+                                body.start_angle_degrees,
+                                body.end_angle_degrees,
+                                body.points.len()
+                            );
+                            stats.logged_first_frame = true;
                         }
-                        Err(error) => {
-                            if debug {
-                                stats.record_err(&error);
-                            }
+                    }
+                    for point in body.points {
+                        if tx.send(point).is_err() {
+                            return true; // 수신 측 종료.
                         }
                     }
                 }
@@ -186,11 +204,22 @@ fn pump_serial(
                 return false; // 재연결 필요.
             }
         }
+
+        // 워치독: 링크는 살아있는데 유효 프레임이 한동안 없으면(어댑터가 나쁜 상태로
+        // 올라온 경우) 스스로 끊고 재연결한다. 정상 연결은 매번 프레임이 오므로 안 걸린다.
+        if last_frame_at.elapsed() > DATA_TIMEOUT {
+            eprintln!(
+                "[viewer] {}ms 동안 유효 프레임 없음 — 재연결합니다.",
+                DATA_TIMEOUT.as_millis()
+            );
+            set_status(status, ConnectionStatus::Error("유효 데이터 없음".to_string()));
+            return false;
+        }
     }
 }
 
 /// debug 빌드이거나 `LIDAR_DEBUG`가 설정돼 있으면 디버그 로그를 켠다.
-fn debug_enabled() -> bool {
+pub(crate) fn debug_enabled() -> bool {
     cfg!(debug_assertions) || std::env::var_os("LIDAR_DEBUG").is_some()
 }
 
@@ -206,43 +235,28 @@ fn log_hex_dump(bytes: &[u8]) {
     }
 }
 
-/// 1초 단위 디코드 통계(디버그 전용). 파싱 실패를 유형별로 센다.
+/// 1초 단위 디코드 통계(디버그 전용).
+///
+/// `ok>0`이면 정상. `ok=0`일 때 `crc_failures>0`이면 헤더는 잡히는데 CRC가 깨지는
+/// 것(거의 맞음 — 비트오류/근접 baud), `crc_failures=0`이고 `skipped`만 크면 헤더(0x54)
+/// 자체가 없는 것(완전히 다른 baud/포맷)을 뜻한다.
 #[derive(Default)]
 struct DecodeStats {
     bytes: usize,
     ok: usize,
-    err_length: usize,
-    err_header: usize,
-    err_verlen: usize,
-    err_crc: usize,
+    /// 동기화 못 잡아 버린 바이트.
+    skipped: usize,
+    /// 헤더는 맞췄으나 CRC 불일치로 버린 횟수.
+    crc_failures: usize,
     logged_first_bytes: bool,
     logged_first_frame: bool,
 }
 
 impl DecodeStats {
-    fn record_err(&mut self, error: &ParseError) {
-        match error {
-            ParseError::InvalidLength { .. } => self.err_length += 1,
-            ParseError::InvalidHeader(_) => self.err_header += 1,
-            ParseError::InvalidVerLen(_) => self.err_verlen += 1,
-            ParseError::CrcMismatch { .. } => self.err_crc += 1,
-        }
-    }
-
-    fn err_total(&self) -> usize {
-        self.err_length + self.err_header + self.err_verlen + self.err_crc
-    }
-
     fn report(&self) {
         eprintln!(
-            "[debug] 1초: {}B 수신 · 프레임 ok={} err={} (len={} hdr={} ver={} crc={})",
-            self.bytes,
-            self.ok,
-            self.err_total(),
-            self.err_length,
-            self.err_header,
-            self.err_verlen,
-            self.err_crc
+            "[debug] 1초: {}B 수신 · 프레임 ok={} · 동기화 버림={}B · CRC불일치={}",
+            self.bytes, self.ok, self.skipped, self.crc_failures
         );
     }
 
@@ -250,10 +264,8 @@ impl DecodeStats {
     fn reset_interval(&mut self) {
         self.bytes = 0;
         self.ok = 0;
-        self.err_length = 0;
-        self.err_header = 0;
-        self.err_verlen = 0;
-        self.err_crc = 0;
+        self.skipped = 0;
+        self.crc_failures = 0;
     }
 }
 

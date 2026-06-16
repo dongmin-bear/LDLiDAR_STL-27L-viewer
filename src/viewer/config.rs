@@ -3,7 +3,6 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
-use std::time::Duration;
 
 use anyhow::Context as _;
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
@@ -36,11 +35,6 @@ pub struct ScanConfig {
     pub max_range_m: f32,
     /// 극좌표 거리 링(동심원) 표시 여부.
     pub show_range_rings: bool,
-    /// 각도 분해능(°). 이 간격으로 버킷을 나눠 최신 스캔을 유지한다.
-    pub angle_resolution_deg: f32,
-    /// 잔상 시간(ms). 마지막 측정 후 이 시간이 지나 갱신이 끊긴 점은 사라진다.
-    /// `0`이면 비활성(시간 제한 없이 계속 표시).
-    pub decay_ms: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -69,8 +63,6 @@ impl Default for ScanConfig {
         Self {
             max_range_m: 12.0,
             show_range_rings: true,
-            angle_resolution_deg: 0.5,
-            decay_ms: 0,
         }
     }
 }
@@ -89,20 +81,6 @@ impl ViewerConfig {
     /// 점 색을 egui 색으로 변환. 파싱 실패 시 기본색으로 폴백한다.
     pub fn point_color(&self) -> egui::Color32 {
         parse_hex_color(&self.points.color).unwrap_or(egui::Color32::from_rgb(0x34, 0xd3, 0x99))
-    }
-
-    /// 한 바퀴를 몇 개의 각도 버킷으로 나눌지. 항상 1 이상.
-    pub fn angle_bins(&self) -> usize {
-        let res = self.scan.angle_resolution_deg.max(0.05);
-        ((360.0 / res).round() as usize).max(1)
-    }
-
-    /// 잔상 시간. `0`이면 비활성(`None`).
-    pub fn decay(&self) -> Option<Duration> {
-        match self.scan.decay_ms {
-            0 => None,
-            ms => Some(Duration::from_millis(ms)),
-        }
     }
 }
 
@@ -205,8 +183,7 @@ color_by_intensity = true
 [scan]
 max_range_m = 12.0      # 표시 최대 거리(m)
 show_range_rings = true # 거리 동심원 표시
-angle_resolution_deg = 0.5
-decay_ms = 0            # 잔상 시간(ms). 0=무한 유지. 끊긴 점 자동 정리하려면 예: 300~1000
+# 화면은 한 바퀴(rotation)가 끝날 때마다 그 회전 전체를 스냅샷으로 그린다(decay 불필요).
 
 [lidar]
 port = "/dev/ttyUSB0"
@@ -244,12 +221,5 @@ mod tests {
         let config: ViewerConfig = toml::from_str(DEFAULT_CONFIG_TOML).unwrap();
         assert_eq!(config.points.size, 2.0);
         assert!(config.scan.show_range_rings);
-    }
-
-    #[test]
-    fn angle_bins_never_zero() {
-        let mut config = ViewerConfig::default();
-        config.scan.angle_resolution_deg = 0.0;
-        assert!(config.angle_bins() >= 1);
     }
 }

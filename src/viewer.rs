@@ -127,7 +127,7 @@ impl ViewerApp {
         config_rx: std::sync::mpsc::Receiver<ViewerConfig>,
         watcher: RecommendedWatcher,
     ) -> Self {
-        let scan = ScanBuffer::new(config.angle_bins());
+        let scan = ScanBuffer::new();
         Self {
             config,
             scan,
@@ -145,15 +145,21 @@ impl ViewerApp {
             latest = Some(config);
         }
         if let Some(config) = latest {
-            self.scan.resize(config.angle_bins());
             self.config = config;
         }
     }
 
     /// 공급원 채널에 쌓인 점을 모두 스캔 버퍼에 반영한다.
+    /// 한 바퀴가 완성될 때마다(debug) 그 프레임의 point 개수를 로그로 찍는다.
     fn drain_points(&mut self) {
+        let debug = source::debug_enabled();
         while let Ok(point) = self.points_rx.try_recv() {
-            self.scan.ingest(&point);
+            match self.scan.ingest(&point) {
+                Some(count) if debug => {
+                    eprintln!("[debug] 완성 프레임: {count} points/frame")
+                }
+                _ => {}
+            }
         }
     }
 }
@@ -163,9 +169,7 @@ impl eframe::App for ViewerApp {
         self.drain_config();
         self.drain_points();
 
-        let points = self
-            .scan
-            .cartesian_points(self.config.scan.max_range_m, self.config.decay());
+        let points = self.scan.cartesian_points(self.config.scan.max_range_m);
         let status = self
             .status
             .lock()
@@ -224,18 +228,11 @@ fn side_panel(
             ui.label(format!("{:.1} m", config.scan.max_range_m));
             ui.end_row();
 
-            ui.label("거리 링");
+            ui.label("range support");
             ui.label(if config.scan.show_range_rings {
                 "ON"
             } else {
                 "OFF"
-            });
-            ui.end_row();
-
-            ui.label("잔상(decay)");
-            ui.label(match config.scan.decay_ms {
-                0 => "무한".to_string(),
-                ms => format!("{ms} ms"),
             });
             ui.end_row();
 
@@ -282,11 +279,19 @@ fn status_indicator(status: &ConnectionStatus, port: &str) -> (egui::Color32, St
 }
 
 /// 중앙 플롯: 그리드·좌표축·커서 좌표는 egui_plot이 내장 제공한다.
+///
+/// 축 범위를 데이터에 자동으로 맞추면(auto-fit) 점 집합이 매 프레임 바뀔 때(특히 decay
+/// 사용 시) 화면이 출렁인다. 그래서 최대 거리 기준 **고정 범위**로 시작하고 auto-fit을 끈다.
+/// 사용자의 줌/팬은 egui_plot이 기억하므로 그대로 동작한다.
 fn draw_plot(ui: &mut egui::Ui, config: &ViewerConfig, points: &[CartesianPoint]) {
+    let r = (config.scan.max_range_m as f64) * 1.05;
     Plot::new("lidar")
         .data_aspect(1.0) // x:y = 1:1 → 거리 왜곡 없음
         .show_grid(true)
         .show_axes(true)
+        .auto_bounds(false) // 데이터에 맞춰 범위 재조정 금지 → 흔들림 제거
+        .default_x_bounds(-r, r)
+        .default_y_bounds(-r, r)
         .coordinates_formatter(
             Corner::LeftBottom,
             CoordinatesFormatter::new(|p, _bounds| format!("x: {:.2} m\ny: {:.2} m", p.x, p.y)),

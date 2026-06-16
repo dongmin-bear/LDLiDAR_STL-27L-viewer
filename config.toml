@@ -1,15 +1,16 @@
 # LiDAR 뷰어 설정 — 저장하면 뷰어에 즉시 반영됩니다(핫리로드).
 
 [points]
-size = 2.0              # 점 반지름(px)
+size = 1.0              # 점 반지름(px)
 color = "#60e50d"       # 점 색 (#RRGGBB 또는 #RRGGBBAA)
 color_by_intensity = true
 
 [scan]
-max_range_m = 12.0      # 표시 최대 거리(m)
+max_range_m = 20.0      # 표시 최대 거리(m)
 show_range_rings = true # 거리 동심원 표시
-angle_resolution_deg = 0.5
+# 화면은 한 바퀴(rotation)가 끝날 때마다 그 회전 전체를 스냅샷으로 그린다(decay/해상도 설정 불필요).
 
 [lidar]
 port = "/dev/ttyUSB0"
+baud = 921600           # 통신 속도. 데이터는 오는데 프레임이 안 잡히면 230400/115200 등으로 시도
 demo = false            # true면 하드웨어 없이 합성 데이터로 동작

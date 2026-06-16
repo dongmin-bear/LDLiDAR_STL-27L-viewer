@@ -31,25 +31,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match port.read(&mut buffer) {
             Ok(bytes_read) if bytes_read > 0 => {
                 for frame in decoder.push_bytes(&buffer[..bytes_read]) {
-                    match frame {
-                        Ok(frame) => {
-                            println!(
-                                "speed={}deg/s start={:.2}deg end={:.2}deg timestamp={}ms points={}",
-                                frame.speed_degrees_per_second,
-                                frame.start_angle_degrees,
-                                frame.end_angle_degrees,
-                                frame.timestamp_ms,
-                                frame.points.len()
-                            );
+                    println!(
+                        "speed={}deg/s start={:.2}deg end={:.2}deg timestamp={}ms points={}",
+                        frame.speed_degrees_per_second,
+                        frame.start_angle_degrees,
+                        frame.end_angle_degrees,
+                        frame.timestamp_ms,
+                        frame.points.len()
+                    );
 
-                            for point in frame.points {
-                                println!(
-                                    "  angle={:.2}deg distance={}mm intensity={}",
-                                    point.angle_degrees, point.distance_mm, point.intensity
-                                );
-                            }
-                        }
-                        Err(error) => eprintln!("dropped invalid frame: {error:?}"),
+                    for point in frame.points {
+                        println!(
+                            "  angle={:.2}deg distance={}mm intensity={}",
+                            point.angle_degrees, point.distance_mm, point.intensity
+                        );
                     }
                 }
             }
