@@ -1,0 +1,17 @@
+[package]
+name = "ldlidar"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serialport = "4.7"
+zerocopy = { version = "0.8.52", features = ["derive"] }
+
+# viewer (egui_plot 기반 2D LiDAR 뷰어)
+eframe = "0.34"
+egui = "0.34"
+egui_plot = "0.35"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+notify = "8"
+anyhow = "1"
