@@ -10,25 +10,63 @@
 ## 1. 모듈 지도
 
 현대식(2018+) 레이아웃: 폴더와 같은 이름의 `*.rs`가 모듈 루트, 하위 모듈은 같은 이름 폴더 안에 둔다.
+**여러 제조사/모델**을 한 뷰어로 쓰려고, 모델별 코덱은 `<제조사>/<모델>/` 폴더에 두고
+공용 계층(수집·뷰어)은 모델을 모른 채 트레잇으로만 다룬다.
 
 ```
 src/
 ├── lib.rs              # 모듈 선언 + 공개 API 재노출
-├── main.rs             # ldlidar : 콘솔 덤프 바이너리
+├── main.rs             # ldlidar : 콘솔 덤프 바이너리(STL-27L)
 ├── bin/viewer.rs       # viewer  : GUI 진입점 → viewer::run()
 │
-├── reader.rs           # [모듈 루트] 읽기·파싱
+├── reader.rs           # [모듈 루트] 읽기·파싱·수집
 ├── reader/
-│   ├── frame.rs        #   47B 프레임 레이아웃 + zero-copy parse() + CRC8
-│   ├── decoder.rs      #   FrameDecoder : 바이트 스트림 → 프레임 절단
-│   └── types.rs        #   LidarPoint / LidarBody / ParseError (공개 타입)
+│   ├── types.rs          #   [공용] LidarPoint / LidarBody / ParseError (모델 독립 도메인 타입)
+│   ├── model.rs          #   [공용] Decoder 트레잇 + Model enum(설정명 → 코덱 팩토리)
+│   ├── transport.rs      #   [공용] Transport 트레잇 + Serial/UDP 구현
+│   ├── data_collector.rs #   [공용] 수집 스레드 + 데모 + 연결상태 + 회전 조립 → Scan publish
+│   ├── LDROBOT/STL-27L/   #   [모델] 시리얼 47B 프레임
+│   │   ├── frame.rs       #     47B 레이아웃 + zero-copy parse() + CRC8
+│   │   └── decoder.rs     #     FrameDecoder : 바이트 스트림 → 프레임 절단(impl Decoder)
+│   └── Pacecat/LDS-50C-E/ #   [모델] UDP 0xFAC7 패킷
+│       ├── frame.rs       #     28B 헤더 + dist/ang/strength 배열 + 16-bit sum 파싱
+│       ├── decoder.rs     #     PacketDecoder : 가변 길이 패킷 절단(impl Decoder)
+│       └── command.rs     #     LVERSH/LSTARH 시작 커맨드(STM32 CRC32) + UDP 연결
 │
-├── viewer.rs           # [모듈 루트] egui_plot 뷰어 + run()
+├── viewer.rs           # [모듈 루트] egui_plot 뷰어 + run() (렌더링만, 모델 독립)
 └── viewer/
-    ├── config.rs       #   config.toml 스키마 + notify 핫리로드
-    ├── source.rs       #   시리얼 리더 스레드 + 데모 + 연결 상태
-    └── scan.rs         #   극좌표 → 직교좌표 누적 버퍼
+    ├── config.rs       #   config.toml 스키마(+model/네트워크) + notify 핫리로드
+    └── projection.rs   #   극좌표 Scan → 직교좌표 CartesianPoint (표현 변환)
 ```
+
+> 폴더명에 하이픈(`STL-27L`)이 있어 Rust 식별자로 못 쓰므로, `reader.rs`에서 `#[path]`로
+> 폴더를 잇고 모듈명은 `ldrobot::stl27l` / `pacecat::lds50ce`로 노출한다.
+
+**책임 3계층**: ① **모델 코덱**(`LDROBOT/…`, `Pacecat/…` — 순수 파싱: 바이트⇄프레임/점, IO·스레드 없음)
+→ ② **공용 수집기**(`data_collector` — `Transport`로 시리얼/UDP를, `Decoder`로 모델을 가린 채
+IO·재연결·프레임 디코딩·회전 재구성 → 완성 `Scan` publish) → ③ **뷰어**(표현: 최신 `Scan` pull →
+직교좌표 변환 → 렌더). 수집·뷰어는 모델을 전혀 모르므로, 새 모델은 코덱 폴더와 `Model` 한 줄만
+추가하면 붙는다.
+
+### 모델 추상화 — 두 개의 트레잇
+
+| 트레잇 | 위치 | 역할 | 구현 |
+|---|---|---|---|
+| `Decoder` | `reader/model.rs` | 바이트 스트림 → 검증된 `LidarBody` 절단 | `FrameDecoder`(STL-27L), `PacketDecoder`(LDS-50C-E) |
+| `Transport` | `reader/transport.rs` | "바이트를 읽는다" 한 가지 모양 | `SerialTransport`(UART), `UdpTransport`(소켓) |
+
+`Model`(STL-27L/LDS-50C-E)이 설정 문자열을 받아 디코더를 만들고, `Source`(Serial/Udp/Demo)가
+전송 파라미터를 들고 있다. `data_collector::pump`는 이 둘만 받아 돌리므로 모델·전송에 무관하다.
+
+### 모델별 차이 한눈에
+
+| | LDROBOT STL-27L | Pacecat LDS-50C-E |
+|---|---|---|
+| 전송 | 시리얼 921600 8N1 | UDP (host:port bind, sensor:6543 커맨드) |
+| 시작 | 포트 열면 바로 스트림 | `LVERSH`→`LSTARH` 커맨드 필요(STM32 CRC32) |
+| 프레임 | 고정 47B | 가변(28B 헤더 + N×5 + 2B 체크섬) |
+| 동기/검증 | 헤더 `0x54`+버전 `0x2c`+CRC8 | 헤더 `0xFAC7`+16-bit sum |
+| 점 배치 | `{거리,세기}` 12개 + 시작/끝각 보간 | SoA(거리 N·각도 N·세기 N), 절대각=(각도+시작각)×0.001° |
 
 ---
 
@@ -129,11 +167,11 @@ angle[i] = (start + (end-start)/11 * i) mod 360
 
 ```rust
 // reader/decoder.rs
-pub fn push_bytes(&mut self, bytes: &[u8]) -> Vec<Result<LidarBody, ParseError>> {
+pub fn push_bytes(&mut self, bytes: &[u8]) -> Vec<LidarBody> {
     self.buffer.extend(bytes);
     let mut frames = Vec::new();
-    while let Some(raw) = self.next_raw_frame() {   // 헤더 0x54 + 버전 0x2c 정렬
-        frames.push(parse(&raw));                   // 각 47B를 parse()로
+    while let Some(frame) = self.next_frame() {     // 헤더 0x54 + 버전 0x2c + CRC8 통과분만
+        frames.push(frame);                         // CRC까지 검증된 프레임만 반환
     }
     frames
 }
@@ -145,7 +183,7 @@ pub fn push_bytes(&mut self, bytes: &[u8]) -> Vec<Result<LidarBody, ParseError>>
 가짜 헤더 때문에 진짜 프레임을 통째로 까먹지 않도록). 버퍼가 한 프레임보다 짧으면 헤더 후보를
 유지한 채 더 받을 때까지 보류한다.
 
-> 디버그 빌드에서는 `source.rs`가 수신 바이트 수와 프레임 ok/err(유형별) 통계를 1초마다
+> 디버그 빌드에서는 `data_collector.rs`가 수신 바이트 수와 프레임 ok/err(유형별) 통계를 1초마다
 > 로그로 남긴다. `ok=0`인데 바이트는 들어오면 헤더/baud 불일치를 의심한다.
 
 ---
@@ -154,62 +192,84 @@ pub fn push_bytes(&mut self, bytes: &[u8]) -> Vec<Result<LidarBody, ParseError>>
 
 ### 4.1 전체 흐름
 
+수집기 스레드가 점을 한 바퀴 `Scan`으로 재구성해 **"최신 한 장" 슬롯**에 publish하고, 뷰어는
+매 프레임 그 슬롯에서 최신 스캔을 **pull**한다. 둘을 잇는 건 FIFO 큐가 아니라 latest-wins
+슬롯이라, 렌더가 늦어도 밀린 점이 쌓이지 않는다(항상 최근 한 바퀴만 그림).
+
 ```
  [시리얼 /dev/ttyUSB0]
         │ 바이트
         ▼
- source.rs : 별도 스레드 (run_serial → pump_serial)
-        │   FrameDecoder.push_bytes() → Vec<Result<LidarBody>>
-        │   body.points 각각을 채널로 send
+ reader/data_collector.rs : 별도 스레드 (run_serial → pump_serial)
+        │   FrameDecoder.push_bytes() → Vec<LidarBody>
+        │   Assembler.ingest(point) : 각도 wrap 감지로 한 바퀴 조립
+        │   완성되면 publish(Scan{ points, rotation })
         ▼
-   mpsc::channel  ───────────────► Feed { points: Receiver<LidarPoint>,
-        │                                  status: Arc<Mutex<ConnectionStatus>> }
+   Arc<Mutex<Option<Scan>>>  ──► ScanFeed { latest, status }
+        │   (latest-wins 슬롯 — 큐 아님)        take_latest() / status()
         ▼
  viewer.rs : ViewerApp::ui()  (매 프레임)
-        │   drain_points() : 채널 비우기 → ScanBuffer.ingest(point)
+        │   pull_latest_scan() : 새 스캔 있으면 교체(없으면 직전 유지)
         ▼
- scan.rs : ScanBuffer
-        │   각도 버킷에 "최신 한 바퀴" 유지 (극좌표)
-        │   cartesian_points(max_range) → Vec<CartesianPoint{x,y,intensity}>
+ viewer/projection.rs : project(&scan.points, max_range)
+        │   극좌표 → Vec<CartesianPoint{x,y,intensity}>  (max_range 필터)
         ▼
  viewer.rs : draw_plot() → egui_plot (그리드·좌표축·줌·팬 내장)
                           draw_points() : 점 렌더 (config 색/크기)
 ```
 
-### 4.2 공급 스레드 (`viewer/source.rs`)
+### 4.2 수집기 (`reader/data_collector.rs`)
 
-`source::spawn(Source)`는 백그라운드 스레드를 띄우고 `Feed`를 돌려준다.
+`reader::spawn(Source)`는 백그라운드 스레드를 띄우고 `ScanFeed`를 돌려준다.
 
 ```rust
-pub struct Feed {
-    pub points: Receiver<LidarPoint>,        // 측정점 스트림
-    pub status: Arc<Mutex<ConnectionStatus>>,// 연결 상태(UI 표시용)
+pub struct Scan { pub points: Vec<LidarPoint>, pub rotation: u64 } // 한 바퀴(극좌표)
+
+pub struct ScanFeed { /* latest: Arc<Mutex<Option<Scan>>>, status */ }
+impl ScanFeed {
+    pub fn take_latest(&self) -> Option<Scan>;     // 최신 스캔 꺼내기(없으면 None)
+    pub fn status(&self) -> ConnectionStatus;      // 연결 상태 사본
 }
 ```
 
 - `run_serial` : 포트를 열어 `pump_serial`로 계속 읽는다. 실패하면 **데모로 조용히 바꾸지 않고**
   상태를 `Error(사유)`로 알린 뒤 1초마다 재연결을 시도한다. (데모는 `demo = true`일 때만.)
-- `pump_serial` : `FrameDecoder.push_bytes()` 결과의 `Ok(body)`마다 `body.points`를 채널로
-  보낸다. 수신 측(앱)이 사라지면 `send` 실패로 스레드가 종료된다.
+- `pump_serial` : `FrameDecoder.push_bytes()`로 프레임을 얻고, 각 `body.points`를 `Assembler`에
+  먹인다. 한 바퀴가 완성되면 `Scan`을 슬롯에 publish(직전 미소비분은 덮어씀 = latest-wins).
+- 무프레임 워치독(1.5초)·열기 직후 입력버퍼 flush 등 견고화는 그대로.
 
-### 4.3 누적 버퍼 (`viewer/scan.rs`)
+### 4.3 회전 재구성 (`Assembler`, `data_collector.rs` 내부)
 
-`LidarPoint`(각도°, 거리mm)를 직교좌표로 바꿔 화면에 그린다. 같은 각도가 계속 다시 들어오므로,
-각도를 일정 간격으로 나눈 **버킷마다 최신 값만** 보관하면 회전 경계를 따로 감지하지 않아도
-안정적인 "현재 한 바퀴" 화면이 된다.
+`LidarPoint`(각도°, 거리mm) 스트림을 **한 바퀴 단위로 재구성**한다. 각도가 단조 증가하다
+절반 바퀴(180°)를 넘게 되감기면 0°를 막 지난 것 = 한 바퀴 완성으로 보고 모은 점들을 통째로
+돌려준다(`std::mem::take`). 거리 0(무효)은 버린다.
 
-각 버킷 샘플은 **수신 시각**을 함께 들고 있어, `[scan] decay_ms`가 켜져 있으면 마지막 갱신 후
-그 시간이 지난(=측정이 끊긴) 점을 `cartesian_points()`에서 제외한다. `0`이면 시간 제한 없이 유지.
+```rust
+fn ingest(&mut self, point: LidarPoint) -> Option<Vec<LidarPoint>>;
+// 완성된 회전의 점들(Some) 또는 None
+```
+
+단순 `angle < prev`가 아니라 **180° 임계**인 이유: 노이즈로 인한 미세 후진(`90.2°→90.1°`)을
+무시하고 진짜 0° 통과(≈356° 급락)만 잡으려고. `MAX_SCAN_POINTS`로 wrap이 안 잡히는 비정상
+스트림의 메모리 폭주를 막는다.
+
+> 이 "재구성"이 핵심 책임 이동이다. 예전엔 뷰어의 UI 스레드에서 점을 누적했지만, 이제 수집
+> 계층이 회전을 조립해 완성된 스캔만 넘긴다.
+
+### 4.4 표현 변환 (`viewer/projection.rs`)
+
+극→직교 변환과 `max_range` 필터는 **렌더링 준비**이고 `max_range`가 뷰어 설정이라, 수집이 아닌
+뷰어에 둔다(수집 계층은 표현·config를 모름).
 
 ```
 x = (distance_mm/1000) · cos(angle)
 y = (distance_mm/1000) · sin(angle)   // 0° = +x축, 반시계 = +각도
 ```
 
-### 4.4 렌더와 설정 (`viewer.rs` + `viewer/config.rs`)
+### 4.5 렌더와 설정 (`viewer.rs` + `viewer/config.rs`)
 
-- `ViewerApp::ui()`가 매 프레임 `drain_config()`(핫리로드) → `drain_points()`(점 수집) →
-  `draw_plot()` 순으로 실행된다.
+- `ViewerApp`은 최신 `Scan`과 `ViewerConfig`만 들고 있다. `ui()`가 매 프레임 `drain_config()`
+  (핫리로드) → `pull_latest_scan()`(최신 스캔 교체) → `project()` → `draw_plot()` 순으로 실행.
 - `draw_plot()`은 `egui_plot::Plot`에 `show_grid`/`show_axes`/`coordinates_formatter`를 켜서
   그리드·좌표·줌·팬을 내장으로 제공한다.
 - `config.toml`은 `notify`로 감시(`config::watch`)하여 저장 즉시 점 크기·색·표시 옵션과 최대
@@ -224,6 +284,7 @@ y = (distance_mm/1000) · sin(angle)   // 0° = +x축, 반시계 = +각도
 |---|---|---|---|
 | 절단 | `reader/decoder.rs` | 바이트 스트림 → 47B 프레임 | 0x54/0x2c 정렬 |
 | 파싱 | `reader/frame.rs` | `&[u8]` → `&RawData`(포인터) → `LidarBody`(소유) | zero-copy + CRC8 |
-| 공급 | `viewer/source.rs` | 프레임 → `LidarPoint` 채널 | 스레드 + 상태/재연결 |
-| 누적 | `viewer/scan.rs` | 극좌표 → 직교좌표 | 각도 버킷 최신값 |
-| 렌더 | `viewer.rs` | 점 → 화면 | egui_plot + config |
+| 수집 | `reader/data_collector.rs` | 프레임 → `Scan`(한 바퀴) publish | 스레드 + 재연결 + 회전 조립 |
+| 핸드오프 | `ScanFeed` | `Scan` 슬롯 ←pull→ 뷰어 | latest-wins (큐 아님) |
+| 표현 | `viewer/projection.rs` | 극좌표 → 직교좌표 | `max_range` 필터 |
+| 렌더 | `viewer.rs` | `CartesianPoint` → 화면 | egui_plot + config (그리기만) |

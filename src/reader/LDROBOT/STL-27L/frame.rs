@@ -6,7 +6,7 @@
 use zerocopy::byteorder::little_endian::U16;
 use zerocopy::{FromBytes, Immutable, KnownLayout, Unaligned};
 
-use super::types::{LidarBody, LidarPoint, ParseError};
+use crate::reader::types::{LidarBody, LidarPoint, ParseError};
 
 pub const HEADER: u8 = 0x54;
 pub const VER_LEN: u8 = 0x2c;
@@ -85,7 +85,7 @@ pub fn parse(data: &[u8]) -> Result<LidarBody, ParseError> {
     })?;
 
     if raw.header != HEADER {
-        return Err(ParseError::InvalidHeader(raw.header));
+        return Err(ParseError::InvalidHeader(raw.header as u16));
     }
 
     if raw.body.ver_len != VER_LEN {
@@ -95,8 +95,8 @@ pub fn parse(data: &[u8]) -> Result<LidarBody, ParseError> {
     let expected_crc = crc8(&data[..CRC_OFFSET]);
     if expected_crc != raw.crc8 {
         return Err(ParseError::CrcMismatch {
-            expected: expected_crc,
-            actual: raw.crc8,
+            expected: expected_crc as u32,
+            actual: raw.crc8 as u32,
         });
     }
 
@@ -107,7 +107,7 @@ pub fn parse(data: &[u8]) -> Result<LidarBody, ParseError> {
         speed_degrees_per_second: raw.body.speed.get(),
         start_angle_degrees: raw_angle_to_degrees(start_angle_raw as f32),
         end_angle_degrees: raw_angle_to_degrees(end_angle_raw as f32),
-        timestamp_ms: raw.body.timestamp.get(),
+        timestamp_ms: raw.body.timestamp.get() as u32,
         points: build_points(&raw.body.points, start_angle_raw, end_angle_raw),
     })
 }

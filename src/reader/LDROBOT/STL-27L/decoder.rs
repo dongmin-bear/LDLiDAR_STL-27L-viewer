@@ -11,8 +11,9 @@
 
 use std::collections::VecDeque;
 
-use super::frame::{crc8, parse, CRC_OFFSET, HEADER, PACKET_LEN, VER_LEN};
-use super::types::LidarBody;
+use super::frame::{CRC_OFFSET, HEADER, PACKET_LEN, VER_LEN, crc8, parse};
+use crate::reader::model::Decoder;
+use crate::reader::types::LidarBody;
 
 /// 바이트 스트림 → 프레임 디코더.
 pub struct FrameDecoder {
@@ -100,6 +101,22 @@ impl FrameDecoder {
 impl Default for FrameDecoder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// 공용 [`Decoder`] 트레잇 구현(수집기가 모델을 모른 채 돌리기 위함). 인헌트 메서드에
+/// 위임하므로 `ldlidar` 콘솔 바이너리처럼 구체 타입을 직접 쓰는 코드도 그대로 동작한다.
+impl Decoder for FrameDecoder {
+    fn push_bytes(&mut self, bytes: &[u8]) -> Vec<LidarBody> {
+        FrameDecoder::push_bytes(self, bytes)
+    }
+
+    fn last_skipped(&self) -> usize {
+        FrameDecoder::last_skipped(self)
+    }
+
+    fn last_crc_failures(&self) -> usize {
+        FrameDecoder::last_crc_failures(self)
     }
 }
 

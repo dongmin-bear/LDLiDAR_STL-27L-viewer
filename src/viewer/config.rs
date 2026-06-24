@@ -40,10 +40,25 @@ pub struct ScanConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct LidarConfig {
+    /// 모델명. 전송 방식을 이 값으로 정한다: "STL-27L"=시리얼, "LDS-50C-E"=UDP.
+    pub model: String,
+
+    // --- 시리얼 모델(STL-27L 등) ---
     /// 시리얼 포트 경로.
     pub port: String,
     /// 통신 속도(baud). STL-27L 기본은 921600. 바꾸면 뷰어 재시작 필요.
     pub baud: u32,
+
+    // --- UDP 모델(LDS-50C-E 등) ---
+    /// 센서(LiDAR)의 IP. 커맨드를 이 주소로 보낸다.
+    pub sensor_ip: String,
+    /// 센서 커맨드 포트(고정 6543).
+    pub command_port: u16,
+    /// 호스트(이 PC)가 데이터를 받을 바인드 IP. "0.0.0.0"이면 모든 인터페이스.
+    pub host_ip: String,
+    /// 호스트가 데이터를 받을 UDP 포트.
+    pub host_port: u16,
+
     /// true면 하드웨어 없이 합성 데이터로 동작(데모 모드).
     pub demo: bool,
 }
@@ -70,8 +85,13 @@ impl Default for ScanConfig {
 impl Default for LidarConfig {
     fn default() -> Self {
         Self {
+            model: "STL-27L".to_string(),
             port: "/dev/ttyUSB0".to_string(),
             baud: 921_600,
+            sensor_ip: "192.168.158.98".to_string(),
+            command_port: 6543,
+            host_ip: "0.0.0.0".to_string(),
+            host_port: 6789,
             demo: false,
         }
     }
@@ -186,9 +206,18 @@ show_range_rings = true # 거리 동심원 표시
 # 화면은 한 바퀴(rotation)가 끝날 때마다 그 회전 전체를 스냅샷으로 그린다(decay 불필요).
 
 [lidar]
-port = "/dev/ttyUSB0"
-baud = 921600           # 통신 속도. 데이터는 오는데 프레임이 안 잡히면 230400/115200 등으로 바꿔 시도
+model = "STL-27L"       # "STL-27L"=시리얼, "LDS-50C-E"=UDP. 모델별로 아래 해당 항목 사용
 demo = false            # true면 하드웨어 없이 합성 데이터로 동작
+
+# STL-27L (시리얼) 설정
+port = "/dev/ttyUSB0"
+baud = 921600           # 통신 속도. 데이터는 오는데 프레임이 안 잡히면 230400/115200 등으로 시도
+
+# LDS-50C-E (UDP) 설정 — model = "LDS-50C-E"일 때 사용
+sensor_ip = "192.168.158.98"   # 센서 IP (커맨드 전송 대상)
+command_port = 6543            # 센서 커맨드 포트(고정)
+host_ip = "0.0.0.0"            # 이 PC 수신 바인드 IP (특정 NIC면 그 IP로)
+host_port = 6789               # 이 PC 데이터 수신 포트
 "##;
 
 #[cfg(test)]

@@ -11,6 +11,15 @@ show_range_rings = true # 거리 동심원 표시
 # 화면은 한 바퀴(rotation)가 끝날 때마다 그 회전 전체를 스냅샷으로 그린다(decay/해상도 설정 불필요).
 
 [lidar]
+model = "LDS-50C-E"     # "STL-27L"=시리얼, "LDS-50C-E"=UDP. 모델별로 아래 해당 항목 사용
+demo = false            # true면 하드웨어 없이 합성 데이터로 동작
+
+# STL-27L (시리얼) 설정
 port = "/dev/ttyUSB0"
 baud = 921600           # 통신 속도. 데이터는 오는데 프레임이 안 잡히면 230400/115200 등으로 시도
-demo = false            # true면 하드웨어 없이 합성 데이터로 동작
+
+# LDS-50C-E (UDP) 설정 — model = "LDS-50C-E"일 때 사용
+sensor_ip = "192.168.0.10"     # 센서 IP (heartbeat로 확인된 실제 IP)
+command_port = 6543            # 센서 커맨드 포트(고정)
+host_ip = "0.0.0.0"            # 이 PC 수신 바인드 IP (특정 NIC면 그 IP로)
+host_port = 6789               # 이 PC 데이터 수신 포트
