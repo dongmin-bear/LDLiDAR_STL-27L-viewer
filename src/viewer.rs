@@ -90,6 +90,22 @@ impl LidarKind {
     }
 }
 
+/// 설정 문자열을 드롭다운 종류로 해석한다(대소문자·구분자 무시). "demo"면 합성.
+fn kind_from_name(name: &str) -> LidarKind {
+    let key: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    if key == "demo" {
+        return LidarKind::Demo;
+    }
+    match Model::from_name(name) {
+        Some(Model::Lds50CE) => LidarKind::Lds50CE,
+        _ => LidarKind::Stl27L,
+    }
+}
+
 /// 한 라이다의 런타임 편집 상태. 텍스트필드용으로 값은 문자열로 보관하고 Start 때 파싱한다.
 #[derive(Clone)]
 struct LidarEntry {
@@ -105,16 +121,9 @@ struct LidarEntry {
 }
 
 impl LidarEntry {
-    /// `config.toml`의 [lidar] 기본값으로 첫 행을 채운다.
+    /// `config.toml`의 한 `[[lidar]]` 항목으로 편집 행을 채운다.
     fn from_config(c: &config::LidarConfig) -> Self {
-        let kind = if c.demo {
-            LidarKind::Demo
-        } else {
-            match Model::from_name(&c.model) {
-                Some(Model::Lds50CE) => LidarKind::Lds50CE,
-                _ => LidarKind::Stl27L,
-            }
-        };
+        let kind = kind_from_name(&c.model);
         Self {
             kind,
             port: c.port.clone(),
@@ -230,7 +239,12 @@ impl ViewerApp {
         config_rx: std::sync::mpsc::Receiver<ViewerConfig>,
         watcher: RecommendedWatcher,
     ) -> Self {
-        let entries = vec![LidarEntry::from_config(&config.lidar)];
+        let mut entries: Vec<LidarEntry> =
+            config.lidars.iter().map(LidarEntry::from_config).collect();
+        if entries.is_empty() {
+            entries.push(LidarEntry::new_default(0));
+        }
+        entries.truncate(MAX_LIDARS);
         Self {
             config,
             entries,

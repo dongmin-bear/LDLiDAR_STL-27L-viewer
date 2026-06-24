@@ -9,12 +9,28 @@ use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Deserialize;
 
 /// `config.toml` 전체 스키마. 누락된 필드는 `#[serde(default)]`로 기본값을 채운다.
-#[derive(Debug, Clone, Default, Deserialize)]
+///
+/// 라이다는 여러 대를 쓸 수 있으므로 `[[lidar]]` 배열로 받는다. 각 항목이 자기 모델과
+/// 설정을 따로 갖는다(전역 단일 설정 아님). 항목이 하나도 없으면 기본 1대로 채운다.
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ViewerConfig {
     pub points: PointsConfig,
     pub scan: ScanConfig,
-    pub lidar: LidarConfig,
+    /// 연결할 라이다 목록(`[[lidar]]`). 항목별로 모델·파라미터가 독립적이다.
+    /// TOML 키는 `lidar`(배열-테이블), Rust 필드명은 `lidars`로 둔다.
+    #[serde(rename = "lidar")]
+    pub lidars: Vec<LidarConfig>,
+}
+
+impl Default for ViewerConfig {
+    fn default() -> Self {
+        Self {
+            points: PointsConfig::default(),
+            scan: ScanConfig::default(),
+            lidars: vec![LidarConfig::default()],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -37,16 +53,17 @@ pub struct ScanConfig {
     pub show_range_rings: bool,
 }
 
+/// 라이다 한 대의 설정. 모델에 따라 필요한 항목만 쓴다(나머지는 무시).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct LidarConfig {
-    /// 모델명. 전송 방식을 이 값으로 정한다: "STL-27L"=시리얼, "LDS-50C-E"=UDP.
+    /// 모델명: "STL-27L"=시리얼, "LDS-50C-E"=UDP, "Demo"=합성 데이터.
     pub model: String,
 
     // --- 시리얼 모델(STL-27L 등) ---
     /// 시리얼 포트 경로.
     pub port: String,
-    /// 통신 속도(baud). STL-27L 기본은 921600. 바꾸면 뷰어 재시작 필요.
+    /// 통신 속도(baud). STL-27L 기본은 921600.
     pub baud: u32,
 
     // --- UDP 모델(LDS-50C-E 등) ---
@@ -56,11 +73,8 @@ pub struct LidarConfig {
     pub command_port: u16,
     /// 호스트(이 PC)가 데이터를 받을 바인드 IP. "0.0.0.0"이면 모든 인터페이스.
     pub host_ip: String,
-    /// 호스트가 데이터를 받을 UDP 포트.
+    /// 호스트가 데이터를 받을 UDP 포트(라이다마다 달라야 한다).
     pub host_port: u16,
-
-    /// true면 하드웨어 없이 합성 데이터로 동작(데모 모드).
-    pub demo: bool,
 }
 
 impl Default for PointsConfig {
@@ -88,11 +102,10 @@ impl Default for LidarConfig {
             model: "STL-27L".to_string(),
             port: "/dev/ttyUSB0".to_string(),
             baud: 921_600,
-            sensor_ip: "192.168.158.98".to_string(),
+            sensor_ip: "192.168.0.10".to_string(),
             command_port: 6543,
             host_ip: "0.0.0.0".to_string(),
             host_port: 6789,
-            demo: false,
         }
     }
 }
@@ -205,19 +218,26 @@ max_range_m = 12.0      # 표시 최대 거리(m)
 show_range_rings = true # 거리 동심원 표시
 # 화면은 한 바퀴(rotation)가 끝날 때마다 그 회전 전체를 스냅샷으로 그린다(decay 불필요).
 
-[lidar]
-model = "STL-27L"       # "STL-27L"=시리얼, "LDS-50C-E"=UDP. 모델별로 아래 해당 항목 사용
-demo = false            # true면 하드웨어 없이 합성 데이터로 동작
+# 라이다는 [[lidar]] 블록으로 한 대씩 추가한다(여러 대 가능). 각 블록이 자기 모델·설정을
+# 따로 갖는다. 뷰어 좌측 드롭다운으로 런타임에 바꿀 수도 있다.
+# model: "STL-27L"=시리얼, "LDS-50C-E"=UDP, "Demo"=합성 데이터.
 
-# STL-27L (시리얼) 설정
+[[lidar]]
+model = "STL-27L"
 port = "/dev/ttyUSB0"
-baud = 921600           # 통신 속도. 데이터는 오는데 프레임이 안 잡히면 230400/115200 등으로 시도
+baud = 921600           # 데이터는 오는데 프레임이 안 잡히면 230400/115200 등으로 시도
 
-# LDS-50C-E (UDP) 설정 — model = "LDS-50C-E"일 때 사용
-sensor_ip = "192.168.158.98"   # 센서 IP (커맨드 전송 대상)
-command_port = 6543            # 센서 커맨드 포트(고정)
-host_ip = "0.0.0.0"            # 이 PC 수신 바인드 IP (특정 NIC면 그 IP로)
-host_port = 6789               # 이 PC 데이터 수신 포트
+# 예) UDP 라이다를 한 대 더 추가:
+# [[lidar]]
+# model = "LDS-50C-E"
+# sensor_ip = "192.168.0.10"   # 센서 IP (커맨드 전송 대상)
+# command_port = 6543          # 센서 커맨드 포트(고정)
+# host_ip = "0.0.0.0"          # 이 PC 수신 바인드 IP (특정 NIC면 그 IP로)
+# host_port = 6789             # 이 PC 데이터 수신 포트(라이다마다 다르게)
+
+# 예) 하드웨어 없이 테스트:
+# [[lidar]]
+# model = "Demo"
 "##;
 
 #[cfg(test)]
@@ -250,5 +270,31 @@ mod tests {
         let config: ViewerConfig = toml::from_str(DEFAULT_CONFIG_TOML).unwrap();
         assert_eq!(config.points.size, 2.0);
         assert!(config.scan.show_range_rings);
+        assert_eq!(config.lidars.len(), 1);
+        assert_eq!(config.lidars[0].model, "STL-27L");
+    }
+
+    #[test]
+    fn multiple_lidars_parse_from_array() {
+        let toml = r#"
+[[lidar]]
+model = "LDS-50C-E"
+sensor_ip = "192.168.0.10"
+
+[[lidar]]
+model = "STL-27L"
+port = "/dev/ttyUSB1"
+"#;
+        let config: ViewerConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.lidars.len(), 2);
+        assert_eq!(config.lidars[0].model, "LDS-50C-E");
+        assert_eq!(config.lidars[0].sensor_ip, "192.168.0.10");
+        assert_eq!(config.lidars[1].port, "/dev/ttyUSB1");
+    }
+
+    #[test]
+    fn empty_config_defaults_to_one_lidar() {
+        let config: ViewerConfig = toml::from_str("").unwrap();
+        assert_eq!(config.lidars.len(), 1);
     }
 }
